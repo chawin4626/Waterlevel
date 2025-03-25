@@ -1,21 +1,146 @@
-MIT License
+#include <Wire.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <DHT.h>
+#include <HTTPClient.h>
+#include <WiFiManager.h>
 
-Copyright (c) 2025 chawin4626
+// 🔹 กำหนด Token และ Chat ID ของ Telegram
+const char* botToken = "7906423188:AAFHSSdArBM-kN-z3ahe1O7iaZTEdAtgYvY";
+const char* chatID = "-4747374637";
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+// Blynk credentials
+const char auth[] = "WhD5_ktf1r9jUnedHYIeNIp3Z6pFL3J_";
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+// GPIO Configuration 
+#define TRIG_PIN 5      
+#define ECHO_PIN 18     
+#define DHT_PIN 15      
+#define DHT_TYPE DHT22  
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// 🔹 ค่าที่ใช้แจ้งเตือน
+float waterLevelThreshold = 15.0; 
+float tempThreshold = 30.0;
+float humidityThreshold = 40.0;
+
+// 🔹 ป้องกันการแจ้งเตือนซ้ำ (Cooldown)
+unsigned long lastTelegramSent = 0;
+#define TELEGRAM_COOLDOWN 60000 // แจ้งเตือนทุก 1 นาที
+
+float measureWaterLevel() {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    float duration = pulseIn(ECHO_PIN, HIGH);
+    float distance = (duration * 0.0343) / 2;
+    return distance;
+}
+
+// 🔹 ฟังก์ชันแจ้งเตือน Telegram
+void sendTelegramMessage(String alertType, float value) {
+    if (WiFi.status() != WL_CONNECTED) return;
+    if (millis() - lastTelegramSent < TELEGRAM_COOLDOWN) return;
+
+    HTTPClient http;
+    http.begin("https://api.telegram.org/bot" + String(botToken) + "/sendMessage");
+    http.addHeader("Content-Type", "application/json");
+
+    String message = "{\"chat_id\":\"" + String(chatID) + "\",\"text\":\"🚨 แจ้งเตือน: " + alertType + "\nค่าปัจจุบัน: " + String(value) + "\"}";
+
+    http.POST(message);
+    http.end();
+    
+    lastTelegramSent = millis();
+}
+
+void setupWiFi() {
+  WiFiManager wifiManager;
+  //ให้ตั้งชื่อ Hotspot เป็น ชื่อภาษาอังกฤษ เช่น Sompoch_MiniProject
+  wifiManager.autoConnect("Waterlaevel_IOT");  // เปิด Hotspot ให้ตั้งค่า Wi-Fi เองหากไม่มีการเชื่อมต่อ Wi-Fi ที่เคยเชื่อมต่อได้
+  Serial.println("✅ Wi-Fi Connected!");
+}
+
+void setup() {
+    Serial.begin(9600);
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+    dht.begin();
+
+    setupWiFi();
+    Serial.println("Connecting to Blynk server...");
+    Blynk.begin(auth, WiFi.SSID().c_str(), WiFi.psk().c_str(), "iotservices.thddns.net", 5535);
+}
+
+BLYNK_CONNECTED() {
+    Serial.println("Blynk connected!");
+    Blynk.syncAll();
+}
+
+// Slider ปรับค่าอุณหภูมิที่ต้องแจ้งเตือนเมื่ออุณหภูมิสูงกว่าระดับที่กำหนด
+BLYNK_WRITE(V4) {  
+    tempThreshold = param.asFloat();
+    Serial.print("🛠 ปรับค่าแจ้งเตือนอุณหภูมิเป็น: ");
+    Serial.print(tempThreshold);
+    Serial.println("°C");
+}
+
+// Slider ปรับค่าความชื้นที่ต้องแจ้งเตือนเมื่อความชื้นต่ำกว่าระดับที่กำหนด
+BLYNK_WRITE(V5) {  
+    humidityThreshold = param.asFloat();
+    Serial.print("🛠 ปรับค่าแจ้งเตือนความชื้นเป็น: ");
+    Serial.print(humidityThreshold);
+    Serial.println("%");
+}
+
+// Slider ปรับค่าระดับน้ำที่ต้องแจ้งเตือนเมื่อระดับน้ำสูงเกินจากปากถัง
+BLYNK_WRITE(V6) {  
+    waterLevelThreshold = param.asFloat();
+    Serial.print("🛠 ปรับค่าแจ้งเตือนระดับน้ำเป็น: ");
+    Serial.print(waterLevelThreshold);
+    Serial.println(" cm");
+}
+
+void loop() {
+    if (Blynk.connected()) {
+        Blynk.run();
+    }
+
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+    float waterLevel = measureWaterLevel();
+
+    if (!isnan(temperature) && !isnan(humidity)) {
+        Blynk.virtualWrite(V1, temperature);
+        Blynk.virtualWrite(V2, humidity);
+        Blynk.virtualWrite(V3, waterLevel);
+        Serial.printf("อุณหภูมิ: %.2f °C, ความชื้น: %.2f %%, ระดับน้ำ: %.2f cm\n", 
+                      temperature, humidity, waterLevel);
+
+        // 🔹 ตรวจสอบค่าและแจ้งเตือน
+        if (waterLevel > waterLevelThreshold) {
+            sendTelegramMessage("⚠️ระดับน้ำสูงเกินจากปากถังเกินกำหนด", waterLevel);
+        }
+        if (temperature > tempThreshold) {
+            sendTelegramMessage("🌡อุณหภูมิสูงเกินกว่ากหนด", temperature);
+        }
+        if (humidity < humidityThreshold) {
+            sendTelegramMessage("💧ความชื้นต่ำเกินกว่ากำหนด", humidity);
+        }
+    }
+    delay(1000);
+}
+
+// 🔹 ปรับ reconnectWiFi() ให้ใช้ WiFiManager
+void reconnectWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("🔄 Reconnecting Wi-Fi...");
+    WiFiManager wifiManager;
+    wifiManager.autoConnect("ESP32_Config");  // เปิด AP ให้ตั้งค่า Wi-Fi ใหม่ถ้าหลุด
+    Serial.println("✅ Wi-Fi Reconnected!");
+  }
+}
